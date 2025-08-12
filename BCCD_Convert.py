@@ -1,4 +1,5 @@
 import os
+from BCCD_Main import BASE_DIR
 
 from BCCD_voc2coco_utils import (
     get_label2id,

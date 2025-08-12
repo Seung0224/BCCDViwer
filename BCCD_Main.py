@@ -1,3 +1,18 @@
+# -*- coding: utf-8 -*-
+
+# =========================
+# 백엔드/환경 설정 (Qt 오류 회피)
+# =========================
+import os
+# 잘못 설정된 QT 경로가 있으면 제거 (Qt platform plugin "windows" 문제 회피)
+os.environ.pop("QT_PLUGIN_PATH", None)  # [FIX]
+# GUI가 필요하면 TkAgg, 서버/저장 전용이면 Agg
+import matplotlib
+matplotlib.use("TkAgg")  # [FIX] Qt 대신 Tk로
+
+# **CPU 강제 실행을 원하면 주석 해제**
+# os.environ["CUDA_VISIBLE_DEVICES"] = ""  # [옵션] CUDA 디바이스 숨김
+
 import glob
 import cv2
 import torch
@@ -6,11 +21,12 @@ import os.path as osp
 import numpy as np
 from matplotlib.widgets import Button
 
+from pathlib import Path  # [FIX] 경로 안전화
 from mmcv import Config
 from mmcv.runner import load_checkpoint
 from mmdet.datasets import build_dataset
 from mmdet.models import build_detector
-from mmdet.apis import train_detector, inference_detector, init_detector, show_result_pyplot
+from mmdet.apis import train_detector, inference_detector, init_detector
 from mmdet.datasets.builder import DATASETS
 from mmdet.datasets.coco import CocoDataset
 from matplotlib import pyplot as plt
@@ -25,19 +41,26 @@ class BCCDDataset(CocoDataset):
 
 
 # =========================
-# User Settings (EDIT ME)
+# 경로 설정 (안전하게)
 # =========================
-CONFIG_FILE = r"D:\BCCDViwer\mmdetection\runs\my_custom_cfg.yaml"   # mmDetection cfg 경로
-WORK_DIR    = r"D:\BCCDViwer\mmdetection\runs"                      # 체크포인트 저장 폴더 (cfg.work_dir과 일치 권장)
-IMG_PATH    = r"D:\BCCDViwer\BCCD_Dataset\BCCD\JPEGImages\BloodImage_00007.jpg"  # 테스트 이미지
-# 학습된 체크포인트(.pth) 직접 지정하고 싶으면 아래 변수에 넣어도 됨. 빈 문자열이면 가장 최신 체크포인트 자동 선택
-CHECKPOINT_FILE = r"D:\BCCDViwer\mmdetection\runs\epoch_12.pth"
+BASE_DIR = Path(r"D:\TOYPROJECT\BCCDViwer")  # [FIX] Path 사용
+
+# User Settings
+CONFIG_FILE = (BASE_DIR / "mmdetection" / "runs" / "my_custom_cfg.yaml").as_posix()  # [FIX]
+WORK_DIR    = (BASE_DIR / "mmdetection" / "runs").as_posix()                         # [FIX]
+IMG_PATH    = (BASE_DIR / "BCCD_Dataset" / "BCCD" / "JPEGImages" / "BloodImage_00007.jpg").as_posix()  # [FIX]
+CHECKPOINT_FILE = (BASE_DIR / "mmdetection" / "runs" / "epoch_12.pth").as_posix()    # [FIX]
+
+# 시각화 / 필터 파라미터
+SCORE_THR = 0.30
 
 
 # =========================
 # Device Helper (CUDA→CPU 자동 폴백)
 # =========================
-def pick_device():
+def pick_device(force_cpu: bool = True) -> str:  # [FIX] 기본 CPU 강제
+    if force_cpu:
+        return "cpu"
     return 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
 
@@ -87,15 +110,14 @@ def train(config_file: str):
 
     # 학습
     train_detector(model, datasets, cfg, distributed=False, validate=True)
-
     print("[Train] Done. Checkpoints saved to:", cfg.work_dir)
 
 
 # =========================
 # Inference
 # =========================
-def load_model_for_inference(config_file: str, checkpoint_file: str = ""):
-    device = pick_device()
+def load_model_for_inference(config_file: str, checkpoint_file: str = "", force_cpu: bool = True):
+    device = pick_device(force_cpu=force_cpu)  # [FIX]
     print(f"[Predict] Using device: {device}")
 
     # 체크포인트 결정
@@ -111,41 +133,47 @@ def load_model_for_inference(config_file: str, checkpoint_file: str = ""):
 
     # (선택) 클래스 이름 강제 지정: cfg 데이터셋과 동일해야 시각화 라벨이 맞음
     if not hasattr(model, 'CLASSES') or not model.CLASSES:
-        # cfg에서 train dataset을 다시 읽어와서 클래스 가져오기
         cfg = Config.fromfile(config_file)
-        ds = build_dataset(cfg.data.test if 'test' in cfg.data else cfg.data.val)
+        test_key = 'test' if 'test' in cfg.data else 'val'
+        ds = build_dataset(cfg.data[test_key])
         model.CLASSES = getattr(ds, 'CLASSES', ('WBC', 'RBC', 'Platelets'))
 
     return model
 
 
-def predict_image(config_file: str, img_path: str, checkpoint_file: str = "", show: bool = True, out_file: str = ""):
+def predict_image(config_file: str, img_path: str, checkpoint_file: str = "",
+                  show: bool = True, out_file: str = "", force_cpu: bool = True):
     if not osp.isfile(img_path):
         raise FileNotFoundError(f"Image not found: {img_path}")
 
-    model = load_model_for_inference(config_file, checkpoint_file)
+    model = load_model_for_inference(config_file, checkpoint_file, force_cpu=force_cpu)
 
-    # --- 이미지 목록 준비 (같은 폴더의 .jpg 정렬) ---
-    img_dir = osp.dirname(img_path)
+    # --- 이미지 목록 준비 (같은 폴더의 .jpg/.png 정렬) ---
+    img_dir = osp.dirname(osp.abspath(img_path))  # [FIX] 절대경로 정규화
     all_imgs = sorted(
-        [p for p in glob.glob(osp.join(img_dir, "*.jpg")) + glob.glob(osp.join(img_dir, "*.png"))]
+        glob.glob(osp.join(img_dir, "*.jpg")) + glob.glob(osp.join(img_dir, "*.png"))
     )
     if not all_imgs:
         raise FileNotFoundError(f"No images found in: {img_dir}")
 
     # 시작 인덱스 결정
+    abs_target = osp.abspath(img_path)
     try:
-        idx = all_imgs.index(osp.abspath(img_path))
+        idx = all_imgs.index(abs_target)
     except ValueError:
-        idx = 0
+        # 경로 표기 차이 보정
+        norm = lambda p: osp.normpath(osp.abspath(p)).lower()
+        norm_list = [norm(p) for p in all_imgs]
+        try:
+            idx = norm_list.index(norm(abs_target))
+        except ValueError:
+            idx = 0
 
     # --- 간단한 박스 오버레이 도우미 (bbox-only; Mask R-CNN도 bbox는 그려짐) ---
-    def draw_overlay(img_bgr, result, classes, score_thr=0.3, alpha=0.45):
+    def draw_overlay(img_bgr, result, classes, score_thr=SCORE_THR):
         overlay = img_bgr.copy()
-        # 결과 포맷: list[np.ndarray] or (bbox_result, segm_result)
         bbox_result = result[0] if isinstance(result, tuple) else result
 
-        # ★ 클래스별 고정 색상 (BGR)
         class_colors = {
             'WBC': (0, 255, 0),       # 초록
             'RBC': (0, 0, 255),       # 빨강
@@ -157,10 +185,10 @@ def predict_image(config_file: str, img_path: str, checkpoint_file: str = "", sh
                 continue
 
             cls_name = classes[cls_idx] if classes and cls_idx < len(classes) else str(cls_idx)
-            color = class_colors.get(cls_name, (255, 255, 255))  # 정의 외 클래스는 흰색
+            color = class_colors.get(cls_name, (255, 255, 255))
 
-            for bx in bboxes:
-                x1, y1, x2, y2, score = bx.astype(float)
+            for bx in np.array(bboxes):
+                x1, y1, x2, y2, score = map(float, bx)
                 if score < score_thr:
                     continue
                 p1, p2 = (int(x1), int(y1)), (int(x2), int(y2))
@@ -173,35 +201,36 @@ def predict_image(config_file: str, img_path: str, checkpoint_file: str = "", sh
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA
                 )
         return overlay
-        
+
     # --- 한 장 추론 ---
     classes = getattr(model, 'CLASSES', ('WBC', 'RBC', 'Platelets'))
+
     def infer_one(path):
         img_bgr = cv2.imread(path)
+        if img_bgr is None:
+            raise FileNotFoundError(f"Failed to read image: {path}")
         result = inference_detector(model, img_bgr)
-        overlay = draw_overlay(img_bgr, result, classes, score_thr=0.3, alpha=0.45)
-        # matplotlib 표시 위해 RGB로 변환
+        overlay = draw_overlay(img_bgr, result, classes, score_thr=SCORE_THR)
         return cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB), result
 
     # --- Matplotlib UI 구성: 이미지 + 좌/우 버튼 ---
     if not show:
-        # show=False면 첫 장만 저장하고 끝
         img_rgb, result = infer_one(all_imgs[idx])
         if out_file:
-            # mmdet 기본 저장
-            model.show_result(cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR), result, out_file=out_file, score_thr=0.3)
+            # 원본 BGR 기준으로 다시 저장
+            bgr_to_save = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(out_file, bgr_to_save)
             print(f"[Predict] Saved:", out_file)
         return result
 
     fig, ax = plt.subplots()
-    plt.subplots_adjust(bottom=0.2)  # 버튼 영역 확보
+    plt.subplots_adjust(bottom=0.2)
 
     img_rgb, result = infer_one(all_imgs[idx])
     imshow_obj = ax.imshow(img_rgb)
     ax.set_title(f"{osp.basename(all_imgs[idx])}  [{idx+1}/{len(all_imgs)}]")
     ax.axis('off')
 
-    # 버튼 영역
     axprev = plt.axes([0.25, 0.05, 0.15, 0.08])
     axnext = plt.axes([0.60, 0.05, 0.15, 0.08])
     bprev = Button(axprev, '◀ Prev')
@@ -227,7 +256,6 @@ def predict_image(config_file: str, img_path: str, checkpoint_file: str = "", sh
     bprev.on_clicked(on_prev)
     bnext.on_clicked(on_next)
 
-    # 키보드 화살표도 지원
     def on_key(event):
         if event.key in ['left', 'a']:
             on_prev(None)
@@ -235,9 +263,7 @@ def predict_image(config_file: str, img_path: str, checkpoint_file: str = "", sh
             on_next(None)
     fig.canvas.mpl_connect('key_press_event', on_key)
 
-    plt.show(block=True)  # 창 유지
-
-    # 마지막으로 본 결과를 반환 (필요 시)
+    plt.show(block=True)
     return result
 
 
@@ -252,8 +278,9 @@ if __name__ == "__main__":
     res = predict_image(
         config_file=CONFIG_FILE,
         img_path=IMG_PATH,
-        checkpoint_file=CHECKPOINT_FILE,  # 빈 값이면 WORK_DIR에서 최신 .pth 자동 탐색
-        show=True,                        # GUI 없는 서버라면 False
-        out_file=osp.join(WORK_DIR, "pred_result.jpg")
+        checkpoint_file=CHECKPOINT_FILE,
+        show=True,
+        out_file=osp.join(WORK_DIR, "pred_result.jpg"),
+        force_cpu=True  # [FIX] CPU 강제
     )
     print("[Predict] Done. Result type:", type(res))
