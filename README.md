@@ -1,4 +1,4 @@
-# BCCDViwer
+# BCCDViewer
 
 Windows 환경에서 **MMDetection 프레임워크**를 활용하여  
 혈액 세포 이미지(BCCD Dataset)를 학습·추론하고, **객체 탐지 결과를 시각화**하는 Python 기반 툴입니다.  
